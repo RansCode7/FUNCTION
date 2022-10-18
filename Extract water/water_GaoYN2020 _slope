@@ -1,0 +1,57 @@
+var AWEI_sh = function(image) {
+    var awei_sh = image.expression('Blue+2.5*Green-1.5*(Nir+Swir1)-0.25*Swir2', {
+    'Nir': image.select(['Nir']),
+    'Green': image.select(['Green']),
+    'Swir1': image.select(['Swir1']),
+    'Swir2': image.select(['Swir2']),
+    'Blue': image.select(['Blue'])
+    });
+  return(awei_sh.rename(['AWEI_sh']));
+};
+var AWEI_nsh = function(image) {
+    var awei_nsh = image.expression('4*(Green-Swir1)-(0.25*Nir+2.75*Swir2)', {
+    'Nir': image.select(['Nir']),
+    'Green': image.select(['Green']),
+    'Swir1': image.select(['Swir1']),
+    'Swir2': image.select(['Swir2'])
+    });
+  return(awei_nsh.rename(['AWEI_nsh']));
+};
+var Ndvi=function(image) {
+  var ndwi = image.normalizedDifference(['Nir', 'Red']).rename('ndwi');
+  return(ndwi);
+};
+var Evi = function(image) {
+  // calculate the enhanced vegetation index
+  var evi = image.expression('2.5 * (Nir - Red) / (1 + Nir + 6 * Red - 7.5 * Blue)', {
+    'Nir': image.select(['Nir']),
+    'Red': image.select(['Red']),
+    'Blue': image.select(['Blue'])
+    });
+  return(evi.rename(['evi']));
+};
+var Mndwi = function(image) {
+  // calculate modified normalized difference water index
+  var mndwi = image.normalizedDifference(['Green', 'Swir1']).rename('mndwi');
+  return(mndwi);
+};
+
+exports.ClassifyWaterGaoYN2020 = function(image,aoi) {
+  var dataset = ee.Image('USGS/SRTMGL1_003').clip(aoi);
+  var terrain = ee.Algorithms.Terrain(dataset);
+  var slope = terrain.select('slope');//坡度
+  var mask1=slope.lt(10);
+  //var mask2=image.select('Nir').lt(0.17);
+  //image=image.updateMask(mask2.updateMask(mask1));
+  image=image.updateMask(mask1);
+  
+  var awei_sh=AWEI_sh(image);
+  var awei_nsh=AWEI_nsh(image);
+  var mndwi = Mndwi(image);
+  var ndvi = Ndvi(image);
+  var evi = Evi(image);
+  var water = (mndwi.gt(ndvi).or(mndwi.gt(evi)))
+              .and(awei_sh.gt(-0.27).or(awei_nsh.gt(-0.88)))
+              .and((awei_nsh.subtract(awei_sh)).gt(-0.2)); 
+  return(water.rename(['waterMask']));
+};

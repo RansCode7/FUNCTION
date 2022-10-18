@@ -1,0 +1,17 @@
+exports.exportimagetodrive=function(imgCol,aoi){
+  var id_list=imgCol.reduceColumns(ee.Reducer.toList(),["date"]).get('list');
+  print(id_list)
+  id_list.evaluate(function(indexs){
+    for(var i=0;i<indexs.length;i++){
+      var image=imgCol.filter(ee.Filter.eq('date',indexs[i])).first();
+      Export.image.toDrive({
+        image:image,
+        description:'L8_'+indexs[i],
+        scale:30,
+        region:aoi,
+        folder:'Col_L8_AnK',
+        maxPixels:1e13
+      })
+    }
+  })
+}

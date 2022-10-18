@@ -1,0 +1,67 @@
+exports.ClassifyWaterRNDWI=function(img,aoi){
+  var rndwi1=img.addBands(img.normalizedDifference(["Swir1","Red"]).rename("RNDWI"));
+  var otsu=function(histogram){
+    var counts=ee.Array(ee.Dictionary(histogram).get('histogram'));
+    var means=ee.Array(ee.Dictionary(histogram).get('bucketMeans'));
+    var size=means.length().get([0]);
+    var total=counts.reduce(ee.Reducer.sum(),[0]).get([0]);
+    var sum=counts.multiply(means).reduce(ee.Reducer.sum(),[0]).get([0]);
+    var mean=sum.divide(total);
+    
+    var indices=ee.List.sequence(1,size);
+    var bss=indices.map(function(i){
+      var aCounts=counts.slice(0,0,i);
+      var aCount =aCounts.reduce(ee.Reducer.sum(),[0]).get([0]);
+      var aMeans=means.slice(0,0,i);
+      var aMean=aMeans.multiply(aCounts)
+      .reduce(ee.Reducer.sum(),[0]).get([0])
+      .divide(aCount);
+      var bCount=total.subtract(aCount);
+      var bMean =sum.subtract(aMean.multiply(aCount)).divide(bCount);
+      return aCount.multiply(aMean.subtract(mean).pow(2)).add(
+        bCount.multiply(bMean.subtract(mean).pow(2)));
+    });
+    print(ui.Chart.array.values(ee.Array(bss),0,means))
+  //Return the mean value corresponding to the maximum BSS.
+  return means.sort(bss).get([-1]);
+  };
+  function normalization(image,region,scale){
+    var mean_std = image.reduceRegion({
+      reducer: ee.Reducer.mean().combine(ee.Reducer.stdDev(),null, true),
+      geometry: region,
+      scale: scale,
+      maxPixels: 10e9,
+    });
+    var unitScale = ee.ImageCollection.fromImages(image.bandNames().map(function(name){
+      name = ee.String(name);
+      var band = image.select(name);
+      var mean=ee.Number(mean_std.get(name.cat('_mean')));
+      var std=ee.Number(mean_std.get(name.cat('_stdDev')));
+      var max=mean.add(std.multiply(3))
+      var min=mean.subtract(std.multiply(3))
+      var band1=ee.Image(min).multiply(band.lt(min)).add(ee.Image(max).multiply(band.gt(max))).add(band.multiply(ee.Image(1).subtract(band.lt(min)).subtract(band.gt(max))))
+      var result_band=band1.subtract(min).divide(max.subtract(min));
+      return result_band;
+      })).toBands().rename(image.bandNames());
+      return unitScale;
+  }
+  
+  var rndwi2=rndwi1.select('RNDWI');
+  var rndwi3=normalization(rndwi2,aoi,10);
+  var rndwi=rndwi3.multiply(10000);
+  
+  var histogram=rndwi.select('RNDWI').reduceRegion({
+    reducer:ee.Reducer.histogram(255, 2)//(maxBuckets, minBucketWidth, maxRaw)
+              .combine('mean', null, true)
+              .combine('variance', null, true), //方差
+    geometry:img.geometry(),
+    scale:10,
+    maxPixels: 1e13,
+    bestEffort: true,
+  })
+  print(Chart.image.histogram(rndwi.select('RNDWI'), aoi, 10));
+  print(histogram);
+  var thredshold=otsu(histogram.get('RNDWI_histogram'));
+  var water=rndwi.select('RNDWI').lt(thredshold).rename(['waterMask']);
+  return water;
+};

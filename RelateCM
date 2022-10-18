@@ -1,0 +1,237 @@
+exports.maskCloud_l5_7=function(image){
+  var qa=image.select('QA_PIXEL');
+  var mask=qa.bitwiseAnd(1<<3).eq(0).and(qa.bitwiseAnd(1<<4).eq(0));
+  return image.updateMask(mask).multiply(0.0000275).add(-0.2)
+              .select(['SR_B1','SR_B2','SR_B3','SR_B4','SR_B5','SR_B7']).rename(['Blue','Green','Red','Nir','Swir1','Swir2'])
+              .copyProperties(image, ["system:time_start"])};
+exports.maskCloud_l8_9=function(image){
+  var qa=image.select('QA_PIXEL');
+  var mask=qa.bitwiseAnd(1<<3).eq(0).and(qa.bitwiseAnd(1<<4).eq(0));
+  return image.updateMask(mask).multiply(0.0000275).add(-0.2)
+              .select(['SR_B2','SR_B3','SR_B4','SR_B5','SR_B6','SR_B7']).rename(['Blue','Green','Red','Nir','Swir1','Swir2'])
+              .copyProperties(image, ["system:time_start"])};
+
+exports.CalRealPixel=function(Col,AOI,Scale){
+  var Col2=Col.map(function(img){
+    var allcount=ee.Image.pixelArea().reduceRegion({
+      reducer: ee.Reducer.count(),
+      geometry: AOI,
+      scale: Scale,
+      maxPixels: 10e15,
+      }).get("area");
+    var realcount=ee.Image.pixelArea().updateMask(img.select(0).mask()).reduceRegion({
+      reducer: ee.Reducer.count(),
+      geometry: AOI,
+      scale: Scale,
+      maxPixels: 10e15,
+      }).get("area");
+    var rate=ee.Number(realcount).divide(allcount);
+    return img.set('RealpixelRate',rate);
+  });
+  return Col2;
+};
+exports.CalAllC=function(Col,cpixel_mask,AOI,Scale,JRCmax){
+  var Col2=Col.map(function(img){
+    var cpixel_mask_img=img.updateMask(cpixel_mask).rename('NIR_C');
+    var c_mean=cpixel_mask_img.reduceRegion({
+      reducer:ee.Reducer.mean(),
+      geometry:AOI,
+      scale:Scale,
+      maxPixels:10e15
+    }).getNumber('NIR_C');
+
+    var c_img=ee.Image.constant(c_mean).toFloat().updateMask(JRCmax);
+    var m_img=img.updateMask(JRCmax);
+    var cm_img=c_img.divide(m_img);
+
+    var q_img=ee.Image.constant(ee.Number(img.get('Q'))).toFloat().updateMask(JRCmax);
+    return img.rename('NIR').addBands(cm_img.rename('CM_IMG'))
+                            .addBands(q_img.rename('Q_IMG'))
+                            .set('date',img.get('date'),'doy',img.get('doy'),'C_mean',c_mean);
+    })
+  return Col2;
+};
+
+exports.CalCmask=function(Col,AOI,Scale){
+  var Cmean=Col.reduce(ee.Reducer.mean());
+  var Cstd=Col.reduce(ee.Reducer.stdDev());
+  var CV=Cstd.divide(Cmean).rename('NIR_CV');
+  Map.addLayer(CV,'','cv');
+  var cv_percen=CV.reduceRegion({
+    reducer:ee.Reducer.percentile([5]),
+    geometry:AOI,
+    scale:Scale,
+    maxPixels:10e15
+  }).getNumber('NIR_CV');
+  var cpixel_mask=CV.lte(cv_percen);
+  return cpixel_mask;
+};
+exports.CalMmask=function(Col,percen,AOI,Scale){
+  var corr_Q = Col.map(function(img){return img.select(['CM_IMG','Q_IMG'])}).reduce(ee.Reducer.spearmansCorrelation());
+  var corr_q_percen =corr_Q.reduceRegion({
+    reducer:ee.Reducer.percentile([percen]),
+    geometry:AOI,
+    scale:Scale,
+    maxPixels:10e13
+  }).getNumber('correlation');
+  var mpixel_mask =corr_Q.select('correlation').gte(corr_q_percen);
+  return mpixel_mask;
+};
+
+exports.CalQthred=function(FeatureCol,StartDate,endDate,thred){
+  var Q=FeatureCol.map(function(f){
+    var diff1=ee.Date(f.get('Date')).difference(StartDate,'day');
+    var diff2=ee.Date(f.get('Date')).difference(endDate,'day');
+    return f.set('Diff1',diff1,'Diff2',diff2)}).filter(ee.Filter.and(ee.Filter.lt('Diff2',0),ee.Filter.gte('Diff1',0)));
+  var Qthred=ee.Number(ee.List(Q.aggregate_array('Discharge')).reduce(ee.Reducer.percentile([thred])));
+  return Qthred;
+};
+
+exports.CalCM=function(Col,mpixel_mask,AOI,Scale){
+  var Col2=Col.map(function(img){
+    var mmask=img.select('NIR').updateMask(mpixel_mask).rename('NIR_M');
+    var m_mean=mmask.reduceRegion({
+      reducer:ee.Reducer.mean(),
+      geometry:AOI,
+      scale:Scale,
+      maxPixels:10e13
+    }).getNumber('NIR_M')
+    return img.set('M_mean',m_mean);
+    }).filter(ee.Filter.notNull(['M_mean']))
+  var Col3=Col2.map(function(img){
+    var cm=ee.Number(img.get('C_mean')).divide(img.get('M_mean'));
+    return img.set('CM',cm);
+  });
+  return Col3;
+};
+exports.CalCMindex=function(Col,mpixel_mask,AOI,Scale,ID){
+  var Col2=Col.map(function(img){
+    var mmask=img.select('NIR').updateMask(mpixel_mask).rename('NIR_M');
+    var m_mean=mmask.reduceRegion({
+      reducer:ee.Reducer.mean(),
+      geometry:AOI,
+      scale:Scale,
+      maxPixels:10e13
+    }).getNumber('NIR_M')
+    return img.set('M_mean',m_mean,'Index',ID);
+    }).filter(ee.Filter.notNull(['M_mean']))
+  var Col3=Col2.map(function(img){
+    var cm=ee.Number(img.get('C_mean')).divide(img.get('M_mean'));
+    return img.set('CM',cm);
+  });
+  return Col3;
+};
+
+exports.DischargeFit = function(ColCM,startDate,midDate,Mode) {
+  if (Mode == 'Poly3Fit') {
+    return(exports.Poly3Fit(ColCM,startDate,midDate));
+  }else if (Mode == 'Poly2Fit') {
+    return(exports.Poly2Fit(ColCM,startDate,midDate));
+  }else if (Mode == 'PowerFit') {
+    return(exports.PowerFit(ColCM,startDate,midDate));
+  }
+};
+exports.PowerFit=function(ColCM,startDate,midDate){
+  var Col2=ColCM.map(function(img){
+    var q=ee.Number(img.get('Q'));
+    var cm=ee.Number(img.get('CM'));
+    return img.set('constant',1,'log_CM',cm.log(),'log_Q',q.log());
+  });
+  var RegressionList=Col2.filterDate(startDate,midDate).reduceColumns(ee.Reducer.toList(3),['constant','log_CM','log_Q']).get('list');
+  var RegressionFit=ee.List(RegressionList).reduce(ee.Reducer.linearRegression(2,1));
+  var coeff=ee.Dictionary(RegressionFit).getArray('coefficients');
+  
+  var ColFit=Col2.map(function(img){
+    var X_array=ee.Array([[1,ee.Number(img.get('log_CM'))]]);
+    var Q_Fit=X_array.matrixMultiply(coeff).get([0,0]).exp();
+    return img.set('Q_Fit',Q_Fit);
+  });
+  return ColFit;
+};
+exports.Poly3Fit=function(ColCM,startDate,midDate){
+  var Col2=ColCM.map(function(img){
+    var cm=ee.Number(img.get('CM'));
+    return img.set('constant',1,'CM2',cm.pow(2),'CM3',cm.pow(3));
+    });
+  var RegressionList=Col2.filterDate(startDate,midDate).reduceColumns(ee.Reducer.toList(5),['constant','CM','CM2','CM3','Q']).get('list');
+  var RegressionFit=ee.List(RegressionList).reduce(ee.Reducer.linearRegression(4,1));
+  
+  var coeff=ee.Dictionary(RegressionFit).getArray('coefficients');
+  var ColFit=Col2.map(function(img){
+    var X_array=ee.Array([[1,ee.Number(img.get('CM')),ee.Number(img.get('CM2')),ee.Number(img.get('CM3'))]]);
+    var Q_Fit=X_array.matrixMultiply(coeff).get([0,0]);
+    return img.set('Q_Fit',Q_Fit);
+  });
+  return ColFit;
+};
+exports.Poly2Fit=function(ColCM,startDate,midDate){
+  var Col2=ColCM.map(function(img){
+    var cm=ee.Number(img.get('CM'));
+    return img.set('constant',1,'CM2',cm.pow(2));
+    });
+  var RegressionList=Col2.filterDate(startDate,midDate).reduceColumns(ee.Reducer.toList(4),['constant','CM','CM2','Q']).get('list');
+  var RegressionFit=ee.List(RegressionList).reduce(ee.Reducer.linearRegression(3,1));
+  
+  var coeff=ee.Dictionary(RegressionFit).getArray('coefficients');
+  var ColFit=Col2.map(function(img){
+    var X_array=ee.Array([[1,ee.Number(img.get('CM')),ee.Number(img.get('CM2'))]]);
+    var Q_Fit=X_array.matrixMultiply(coeff).get([0,0]);
+    return img.set('Q_Fit',Q_Fit);
+  });
+  return ColFit;
+};
+exports.exportCSV=function(Col,Name,folderName){
+  Export.table.toDrive({
+    collection:Col,
+    description:Name,
+    folder:folderName,
+    fileNamePrefix:Name,
+    fileFormat:'CSV',
+  });
+};
+/*exports.CalCMpolyFit=function(Col,mpixel_mask,AOI,Scale,JRCmax,ID,startDate,midDate){
+  var Col2=Col.map(function(img){
+    var mmask=img.select('NIR').updateMask(mpixel_mask).rename('NIR_M');
+    var m_mean=mmask.reduceRegion({
+      reducer:ee.Reducer.mean(),
+      geometry:AOI,
+      scale:Scale,
+      maxPixels:10e13
+    }).getNumber('NIR_M')
+    return img.set('M_mean',m_mean,'Index',ID);
+    }).filter(ee.Filter.notNull(['M_mean']));
+  var Col3=Col2.map(function(img){
+    var cm=ee.Number(img.get('C_mean')).divide(img.get('M_mean'));
+    var cmimg=ee.Image.constant(cm).toFloat().rename('cm');
+    var cm2img=ee.Image.constant(cm.pow(2)).toFloat().rename('cm2');
+    var cm3img=ee.Image.constant(cm.pow(3)).toFloat().rename('cm3');
+    var qimg=img.select('Q_IMG').rename('q');
+    return img.addBands(ee.Image.constant(1))
+             .addBands(cmimg)
+             .addBands(cm2img)
+             .addBands(cm3img)
+             .addBands(qimg).set('CM',cm,'CM2',cm2,'CM3',cm3,'log_CM',cm.log());
+    });
+  var varible=ee.List(['constant','cm','cm2','cm3']);
+  var dependent=ee.String('q');
+  var fit=Col3.filterDate(startDate,midDate).select(varible.add(dependent)).reduce(ee.Reducer.linearRegression(4,1));
+  
+  var coefficients=fit.select('coefficients').arrayProject([0]).arrayFlatten([varible]);
+  Map.addLayer(coefficients,'','coefficients',false);
+  var fittedQ = Col3.map(function(image) {
+    return image.addBands(image.select(varible)
+                               .multiply(coefficients)
+                               .reduce('sum')
+                               .rename('fittedQ'));
+  });
+  print(fittedQ,'fittedQ');
+  // Plot the fitted model and the original data at the ROI.
+  print(ui.Chart.image.series(fittedQ.select(['fittedQ','q']), AOI, ee.Reducer.mean(), 30)
+      .setSeriesNames(['Q', 'fittedQ'])
+      .setOptions({
+        title: 'PolyFit: original and fitted values',
+        lineWidth: 1,
+        pointSize: 3,
+  }));
+  return fittedQ;
+};*/

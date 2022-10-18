@@ -1,0 +1,103 @@
+var otsufun=require('users/RAN_CHEN/FUNCTION:otsu');
+exports.waters1vv=function(img,aoi){
+  var vv = img.select('VV');
+  //滤波处理 
+  var vv_smoothed = vv.focal_mean(3,'circle','pixels').rename('VV_Filtered');
+  img=img.addBands(vv_smoothed);
+  var SVV = img.select("VV_Filtered");
+  var his = img.reduceRegion({
+    reducer: ee.Reducer.histogram(), 
+    geometry: aoi,
+    scale: 10,
+    maxPixels: 1e13,
+    tileScale: 16
+  });
+  //print(Chart.image.histogram(SVV, aoi, 10));
+  var threshold = otsufun.otsu(ee.Dictionary(his).get("VV_Filtered"));
+  var water = SVV.lte(threshold);
+  return water.rename('waterMask');
+};
+exports.waters1vv2=function(img,aoi){
+  var vv = img.select('VV');
+
+  var his = img.reduceRegion({
+    reducer: ee.Reducer.histogram(), 
+    geometry: aoi,
+    scale: 10,
+    maxPixels: 1e13,
+    tileScale: 16
+  });
+  //print(Chart.image.histogram(SVV, aoi, 10));
+  var threshold = otsufun.otsu(ee.Dictionary(his).get("VV"));
+  var water = vv.lte(threshold);
+  return water.rename('waterMask');
+};
+exports.waters1vvvh=function(img,aoi){
+  var VVVH=img.select('VV').multiply(img.select('VH')).rename('VVVH');
+
+  var his = VVVH.reduceRegion({
+    reducer: ee.Reducer.histogram(), 
+    geometry: aoi,
+    scale: 10,
+    maxPixels: 1e13,
+    tileScale: 16
+  });
+  //print(Chart.image.histogram(SVV, aoi, 10));
+  var threshold = otsufun.otsu(ee.Dictionary(his).get("VVVH"));
+  var water = VVVH.gt(threshold);
+  return water.rename('waterMask');
+};
+exports.waters1sdwi=function(img,aoi){
+  var vv = img.select('VV');
+  var vh = img.select('VH');
+  //滤波处理 
+  var vv_smoothed = vv.focal_mean(50,'circle','meters').rename('VV_Filtered');
+  var vh_smoothed = vh.focal_mean(50,'circle','meters').rename('VH_Filtered');
+  img=img.addBands(vv_smoothed).addBands(vh_smoothed);
+  //SDWI
+  var VH = img.select("VH_Filtered");
+  var VV = img.select("VV_Filtered");
+  var x = VV.multiply(VH).multiply(10);
+  var y=(x).log();
+  var sdwi=y.subtract(8);
+  var sdwi1 = sdwi.select("VV_Filtered").rename("sdwi");
+  var sdwi2=sdwi1.select('sdwi');
+  var sdwi3=otsufun.normalization(sdwi2,aoi,10);
+  var SDWI=sdwi3.multiply(10000);
+  var histogram = SDWI.select('sdwi').reduceRegion({
+    reducer: ee.Reducer.histogram(255, 2)
+               .combine('mean', null, true)
+               .combine('variance', null, true), 
+    geometry: aoi, 
+    scale: 10,
+    bestEffort: true
+  });
+  //print(Chart.image.histogram(SDWI.select('sdwi'), aoi, 10));
+  var threshold = otsufun.otsu(histogram.get('sdwi_histogram'));
+  var water = SDWI.select('sdwi').gt(threshold);
+  return water.rename('waterMask');
+};
+exports.waters1sdwi2=function(img,aoi){
+  //SDWI
+  var VV = img.select('VV');
+  var VH = img.select('VH');
+  var x = VV.multiply(VH).multiply(10);
+  var y=(x).log();
+  var sdwi=y.subtract(8);
+  var sdwi1 = sdwi.rename("sdwi");
+  var sdwi2=sdwi1.select('sdwi');
+  var sdwi3=otsufun.normalization(sdwi2,aoi,10);
+  var SDWI=sdwi3.multiply(10000);
+  var histogram = SDWI.select('sdwi').reduceRegion({
+    reducer: ee.Reducer.histogram(255, 2)
+               .combine('mean', null, true)
+               .combine('variance', null, true), 
+    geometry: aoi, 
+    scale: 10,
+    bestEffort: true
+  });
+  //print(Chart.image.histogram(SDWI.select('sdwi'), aoi, 10));
+  var threshold = otsufun.otsu(histogram.get('sdwi_histogram'));
+  var water = SDWI.select('sdwi').gt(threshold);
+  return water.rename('waterMask');
+};

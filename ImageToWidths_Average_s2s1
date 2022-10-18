@@ -1,0 +1,65 @@
+var AssignDefault = function(x, dv) {
+  return(typeof x !== 'undefined' ? x : dv);
+};
+//【去云】
+exports.maskS2clouds=function(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(
+             qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask).divide(10000)
+      .select(['B2', 'B3', 'B4', 'B8',  'B11', 'B12'])
+      .copyProperties(image, ["system:time_start"]);
+}
+//【提水】
+exports.ClassifyWater = function(imgIn, method, aoi) {
+  if (method == 'Jones2019') {
+    var waterJones2019 = require('users/RAN_CHEN/FUNCTION:Extract water/water_Jones2019');
+    return(waterJones2019.ClassifyWaterJones2019(imgIn));
+  } else if (method == 'Zou2018') {
+    var waterZou2018 = require('users/RAN_CHEN/FUNCTION:Extract water/water_Zou2018');
+    return(waterZou2018.ClassifyWaterZou2018(imgIn));
+  }else if (method == 'GaoYN2020') {
+    var waterGaoYN2020 = require('users/RAN_CHEN/FUNCTION:Extract water/water_GaoYN2020');
+    return(waterGaoYN2020.ClassifyWaterGaoYN2020(imgIn,aoi));
+  }else if (method == 'Rndwiotsu') {
+    var waterRndwi = require('users/RAN_CHEN/FUNCTION:Extract water/water_RNDWI');
+    return(waterRndwi.ClassifyWaterRNDWI(imgIn,aoi));
+  } else if (method == 'Ndwiotsu') {
+    var waterNdwiotsu = require('users/RAN_CHEN/FUNCTION:Extract water/water_ndwi_otsu');
+    return(waterNdwiotsu.ClassifyWaterNDWI(imgIn,aoi));
+  }
+};
+//【提河】
+exports.ExtractRiver=function(image,maxDistance,FILL_SIZE,GRWL){
+  var bound=image.select('waterMask').geometry();
+  var CL=GRWL.filterBounds(bound);
+  var connectedToCl=image.not().cumulativeCost({
+    source:ee.Image().toByte().paint(CL,1).and(image),
+    maxDistance:maxDistance,
+    geodeticDistance:false
+  }).eq(0);
+  var channel=image.updateMask(connectedToCl).unmask(0).updateMask(image.gte(0)).rename(['channelMask']);
+  var fill=channel.not().selfMask().connectedPixelCount(FILL_SIZE).lt(FILL_SIZE);
+  var river=channel.where(fill,ee.Image(1)).rename(['riverMask']);
+  return image.addBands(channel).addBands(river);
+};
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+exports.ExtractWidths_merge = function(waterImage,maxDistance,FILL_SIZE,GRWL,AOI,Length){
+  var riverOut=exports.ExtractRiver(waterImage,maxDistance,FILL_SIZE,GRWL);
+  ///////////////
+  riverOut=riverOut.clip(AOI)
+  var area=ee.Number(((riverOut.eq(1).multiply(ee.Image.pixelArea())).reduceRegion({
+      reducer: ee.Reducer.sum(),
+      geometry: AOI,
+      scale: 10,
+      maxPixels: 1E13
+  })).get('riverMask')).round()
+  var width=area.divide(Length)
+  return width;
+}
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////

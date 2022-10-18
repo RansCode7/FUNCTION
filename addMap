@@ -1,0 +1,47 @@
+var rawLayer = null;
+exports.showSelectRawImage=function(sCol, key, value,aoi,viz) {
+  //print("show raw image id is: " + value);
+  if (rawLayer !== null) {
+    Map.remove(rawLayer);
+    rawLayer = null;
+  }
+  var image = ee.Image(sCol.filter(ee.Filter.eq(key, value)).first());
+  print(image.clip(aoi))
+  rawLayer = Map.addLayer(image,viz, 'NIR');
+}
+exports.addPanel=function(sCol, key,aoi,viz) {
+  var id_list = sCol.reduceColumns(ee.Reducer.toList(), [key]).get('list');
+  id_list.evaluate(function(ids) {
+    var total = ids.length;
+    var showTitle = ui.Label("", {fontWeight: 'bold'});
+    var curIndex = 0;
+    var bPlus = ui.Button("+", function() {
+      curIndex += 1;
+      if (curIndex >= total) {
+        curIndex = 0;
+      }
+      showTitle.setValue(ids[curIndex]);
+      exports.showSelectRawImage(sCol, key, ids[curIndex],aoi,viz);
+    });
+    var bReduce = ui.Button("-", function() {
+      curIndex -= 1;
+      if (curIndex < 0) {
+        curIndex = total - 1;
+      }
+      showTitle.setValue(ids[curIndex]);
+      exports.showSelectRawImage(sCol, key, ids[curIndex],aoi,viz);
+    });
+    showTitle.setValue(ids[curIndex]);
+    exports.showSelectRawImage(sCol, key, ids[curIndex],aoi,viz);
+    var main = ui.Panel({
+      widgets: [
+        ui.Label('click "+" or "-" to move time window', {fontWeight: 'bold'}),
+        bPlus, bReduce,
+        ui.Label("select date: ", {fontWeight: 'bold'}),
+        showTitle
+      ],
+      style: {width: '200px', padding: '8px'}
+    });
+    ui.root.insert(0, main);
+  });
+}

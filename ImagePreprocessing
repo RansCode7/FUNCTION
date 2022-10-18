@@ -1,0 +1,200 @@
+var speckle_filter = require('users/RAN_CHEN/S1Preprocessing:speckle_filter');
+var terrain_flattening = require('users/RAN_CHEN/S1Preprocessing:terrain_flattening');
+var border_noise_correction = require('users/RAN_CHEN/S1Preprocessing:border_noise_correction');//require('users/adugnagirma/gee_s1_ard:border_noise_correction');
+
+exports.s1_preproc = function(params) {
+  
+  /************************  
+   * 0. CHECK PARAMETERS  
+  ************************/
+  if (params.ORBIT === undefined) params.ORBIT = 'BOTH';
+  if (params.SPECKLE_FILTER === undefined) params.SPECKLE_FILTER = "GAMMA MAP";
+  if (params.SPECKLE_FILTER_KERNEL_SIZE===undefined) params.SPECKLE_FILTER_KERNEL_SIZE = 7;
+  if (params.TERRAIN_FLATTENING_MODEL === undefined) params.TERRAIN_FLATTENING_MODEL = 'VOLUME';
+  if (params.TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER === undefined) params.TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER = 0;
+  if (params.FORMAT === undefined) params.FORMAT = 'DB';
+  if (params.DEM === undefined) params.DEM = ee.Image('USGS/SRTMGL1_003');
+  if (params.POLARIZATION === undefined) params.POLARIZATION = 'VVVH';
+  if (params.APPLY_ADDITIONAL_BORDER_NOISE_CORRECTION === undefined) params.APPLY_ADDITIONAL_BORDER_NOISE_CORRECTION = true;
+  if (params.APPLY_TERRAIN_FLATTENING===undefined) params.APPLY_TERRAIN_FLATTTENING = true;
+  if (params.APPLY_SPECKLE_FILTERING===undefined) params.APPLY_SPECKLE_FILTERING = true; 
+  if (params.SPECKLE_FILTER_FRAMEWORK===undefined) params.SPECKLE_FILTER_FRAMEWORK = 'MULTI';
+  
+  function notContains(list, value) {return list.indexOf(value) == -1;}
+  
+  var orbit_required = ['ASCENDING', 'DESCENDING', 'BOTH']
+  if (notContains(orbit_required, params.ORBIT)) {
+       throw new Error("Parameter ORBIT not correctly defined")
+  } 
+  
+  var pol_required = ['VV', 'VH', 'VVVH']
+  if (notContains(pol_required, params.POLARIZATION)) {
+       throw new Error("Parameter POLARIZATION not correctly defined")
+  } 
+  
+  var model_required = ['DIRECT', 'VOLUME']
+  if (notContains(model_required, params.TERRAIN_FLATTENING_MODEL)) {
+       throw new Error("Parameter TERRAIN_FLATTENING_MODEL not correctly defined")
+  } 
+  
+  var format_required = ['LINEAR', 'DB']
+  if (notContains(format_required, params.FORMAT)) {
+       throw new Error("Parameter FORMAT not correctly defined")
+  } 
+  
+  var frame_required = ['MONO', 'MULTI']
+  if (notContains(frame_required, params.SPECKLE_FILTER_FRAMEWORK)) {
+       throw new Error("Parameter SPECKLE_FILTER_FRAMEWORK not correctly defined")
+  } 
+  
+  var sfilter_required = ['BOXCAR', 'LEE', 'GAMMA MAP', 'REFINED LEE', 'LEE SIGMA']
+  if (notContains(sfilter_required, params.SPECKLE_FILTER)) {
+       throw new Error("Parameter SPECKLE_FILTER not correctly defined")
+  } 
+
+  if (params.TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER < 0) {
+  throw new Error("The TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER should be GREATER or EQUAL to 0")}
+
+  if (params.SPECKLE_FILTER_KERNEL_SIZE <= 0) {
+  throw new Error("The SPECKLE_FILTER_KERNEL_SIZE should be a positive integer")}
+  
+  /************************  
+   * 1. Data Selection
+  ************************/ 
+
+  // Select S1 GRD ImageCollection
+var s1 = ee.ImageCollection('COPERNICUS/S1_GRD_FLOAT')
+      .filter(ee.Filter.eq('instrumentMode', 'IW'))
+      .filter(ee.Filter.eq('resolution_meters', 10))
+      .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+      .filterDate(params.START_DATE, params.STOP_DATE)
+      .filterBounds(params.GEOMETRY)
+      .map(function(img){     
+          var allcount=ee.Image.pixelArea().reduceRegion({
+                     reducer: ee.Reducer.count(),
+                     geometry: params.GEOMETRY,
+                     scale: 10,
+                     maxPixels: 10e15,
+                     }).get("area");
+          var realcount=ee.Image.pixelArea().updateMask(img.select(0).mask()).reduceRegion({
+                     reducer: ee.Reducer.count(),
+                     geometry: params.GEOMETRY,
+                     scale: 10,
+                     maxPixels: 10e15,
+                     }).get("area");
+          var rate=ee.Number(realcount).divide(allcount);
+          return img.set('RealpixelRate',rate);
+          })
+      .map(function(image) {
+        var time_start = image.get("system:time_start");
+        return image.set("date", ee.Date(time_start).format("yyyyMMdd"),'RealpixelRate',image.get('RealpixelRate'),'date2',ee.Date(time_start).format("HHmmss"));
+      })    
+
+  //select orbit
+  if (params.ORBIT !== 'BOTH'){s1 = s1.filter(ee.Filter.eq('orbitProperties_pass', params.ORBIT))}
+  
+  //select polarization
+  if (params.POLARIZATION=='VV') { s1 = s1.select(['VV','angle'])}
+  else if (params.POLARIZATION=='VH') {s1 = s1.select(['VH','angle'])}
+  else if (params.POLARIZATION=='VVVH') {s1 = s1.select(['VV', 'VH', 'angle'])}
+
+  var dates=s1.map(function(img){
+                   var rate=ee.Number(img.get('RealpixelRate'))
+                   var valid_date=ee.Algorithms.If(rate.gt(0.8),img.date().format('YYYY-MM-dd'))
+                   return ee.Feature(null, {'date': valid_date})}).distinct('date').aggregate_array('date')
+  var s11=ee.ImageCollection(dates.map(function(date){
+        return s1.filterDate(date, ee.Date(date).advance(1,'day')).toList(1)
+      }).flatten())    
+  print('Number of images in s1 collection: ', s1.size(),s11.size());
+  
+  /************************************  
+   * 2. Additional Border Noise Correction  
+  ****************************** ******/
+  
+  if (params.APPLY_ADDITIONAL_BORDER_NOISE_CORRECTION) {
+    var s1_1 = s11.map(border_noise_correction.f_mask_edges) 
+    //print('ADDITIONAL BORDER NOISE CORRECTION COMPLETED') 
+    }
+  else {s1_1 = s11}
+
+
+  /*************************  
+   * 3. Speckle Filtering  
+  *************************/
+ if (params.APPLY_SPECKLE_FILTERING) {
+    if (params.SPECKLE_FILTER_FRAMEWORK == 'MONO') {
+        s1_1 = ee.ImageCollection(speckle_filter.MonoTemporal_Filter(s1_1, params.SPECKLE_FILTER_KERNEL_SIZE, params.SPECKLE_FILTER ))
+        //print('MONO-TEMPORAL SPECKLE FILTERING COMPLETED')
+  } 
+    else {
+        s1_1 = ee.ImageCollection(speckle_filter.MultiTemporal_Filter(s1_1, params.SPECKLE_FILTER_KERNEL_SIZE, params.SPECKLE_FILTER,params.SPECKLE_FILTER_NR_OF_IMAGES ));
+        //print('MULTI-TEMPORAL SPECKLE FILTERING COMPLETED') 
+  }    
+ }  
+ 
+   /***************************************   
+   * 4. Radiometric Terrain Normalization 
+  ****************************************/
+  
+  if (params.APPLY_TERRAIN_FLATTENING) {
+      s1_1 = ee.ImageCollection(terrain_flattening.slope_correction(s1_1, params.TERRAIN_FLATTENING_MODEL, params.DEM, params.TERRAIN_FLATTENING_ADDITIONAL_LAYOVER_SHADOW_BUFFER)); 
+      //print('RADIOMETRIC TERRAIN NORMALIZATION COMPLETED')
+  }
+  
+      //Clip to roi (input)
+  if (params.CLIP_TO_ROI) {s1 = s1.map(function(image) {
+              return image.clip(params.GEOMETRY)})}
+  
+        //Clip to roi (processed)
+  if (params.CLIP_TO_ROI) {s1_1 = s1_1.map(function(image) {
+              return image.clip(params.GEOMETRY)})}
+  
+  return [s1, s1_1]
+};
+exports.maskS2clouds=function(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(
+             qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask).divide(10000)
+      .select(['B2', 'B3', 'B4', 'B8',  'B11', 'B12'])
+      .copyProperties(image, ["system:time_start"]);
+}
+exports.s2_preproc = function(params) {
+  var bns2 = ['B2', 'B3', 'B4', 'B8',  'B11', 'B12'];
+  var bns = [ 'Blue', 'Green', 'Red', 'Nir', 'Swir1', 'Swir2'];
+  var s2=ee.ImageCollection("COPERNICUS/S2_SR")
+           .filterDate(params.START_DATE, params.STOP_DATE)
+           .filterBounds(params.GEOMETRY)
+           .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', params.CLOUDY_PIXEL_PERCENTAGE))
+           .map(exports.maskS2clouds)
+           .select(['B8','B4','B3','B2','B11','B12'])
+           .select(bns2,bns)
+           .map(function(image) {var time_start = image.get("system:time_start");return image.set("date", ee.Date(time_start).format("yyyyMMdd"),'date2',ee.Date(time_start).format("HHmmss"));})
+           .sort("system:time_start");
+  var dates=s2.map(function(img){
+                   var allcount=ee.Image.pixelArea().reduceRegion({
+                     reducer: ee.Reducer.count(),
+                     geometry: params.GEOMETRY,
+                     scale: 10,
+                     maxPixels: 10e15,
+                     }).get("area");
+                   var realcount=ee.Image.pixelArea().updateMask(img.select(0).mask()).reduceRegion({
+                     reducer: ee.Reducer.count(),
+                     geometry: params.GEOMETRY,
+                     scale: 10,
+                     maxPixels: 10e15,
+                     }).get("area");
+                   var rate=ee.Number(realcount).divide(allcount);
+                   var valid_date=ee.Algorithms.If(rate.gt(0.8),img.date().format('YYYY-MM-dd'))
+                   return ee.Feature(null, {'date': valid_date})}).distinct('date').aggregate_array('date')
+  var s22=ee.ImageCollection(dates.map(function(date){
+        return s2.filterDate(date, ee.Date(date).advance(1,'day')).toList(s2.size())
+      }).flatten())
+  print('Number of images in s2 collection: ',s2.size(),s22.size());
+  //Clip to roi (processed)
+  if (params.CLIP_TO_ROI) {s22 = s22.map(function(image) {
+              return image.clip(params.GEOMETRY)})}
+  return [s2,s22]
+};
